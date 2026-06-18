@@ -1,0 +1,12 @@
+.git
+.gitignore
+.dockerignore
+.env
+.env.example
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.vscode/
+README.md

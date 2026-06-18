@@ -1,21 +1,8 @@
-"""
-apuestas-service
-================
-Microservicio de APUESTAS DEPORTIVAS del casino (FastAPI).
-
-Comparte la base de datos y el JWT con casino-backend. Permite:
-  - Listar eventos deportivos abiertos con sus cuotas.
-  - Apostar: debita saldo y registra la apuesta (transacción atómica).
-  - Ver las apuestas propias.
-  - Resolver un evento (admin): liquida apuestas, paga las ganadoras.
-
-Prefijo de rutas: /api/apuestas
-"""
 import json
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -61,15 +48,26 @@ class ResolverRequest(BaseModel):
     resultado: str = Field(description="local | empate | visita")
 
 
-# TODO (alumno): implementar las rutas de salud que usará Kubernetes:
-#   - liveness: ¿el proceso está vivo? (respuesta simple).
-#   - readiness: ¿está listo para recibir tráfico? Debe verificar la BD.
-# Luego configurar livenessProbe/readinessProbe en el Deployment de EKS.
+@app.get("/livez", status_code=status.HTTP_200_OK)
+def liveness_probe():
+    return {"status": "alive"}
+
+
+@app.get("/readyz")
+def readiness_probe(response: Response):
+    try:
+        with conexion() as conn:
+            with dict_cursor(conn) as cur:
+                cur.execute("SELECT 1;")
+                cur.fetchone()
+        return {"status": "ready"}
+    except Exception as e:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {"status": "unready", "reason": str(e)}
 
 
 @app.get("/api/apuestas/eventos")
 def listar_eventos():
-    """Eventos abiertos con sus cuotas (público)."""
     with conexion() as conn:
         with dict_cursor(conn) as cur:
             cur.execute(
@@ -85,13 +83,11 @@ def listar_eventos():
 
 @app.post("/api/apuestas", status_code=201)
 def apostar(body: ApuestaRequest, usuario: dict = Depends(usuario_actual)):
-    """Realiza una apuesta: valida saldo, debita y crea la apuesta pendiente."""
     if body.seleccion not in SELECCIONES:
         raise HTTPException(status_code=400, detail="seleccion debe ser local | empate | visita")
 
     with conexion() as conn:
         with dict_cursor(conn) as cur:
-            # 1) Evento abierto + cuota de la selección
             cur.execute(
                 "SELECT * FROM eventos_deportivos WHERE id = %s",
                 (body.evento_id,),
@@ -105,7 +101,6 @@ def apostar(body: ApuestaRequest, usuario: dict = Depends(usuario_actual)):
             cuota = float(evento[CUOTA_COL[body.seleccion]])
             ganancia = round(body.monto * cuota, 2)
 
-            # 2) Debitar saldo de forma atómica (rechaza si es insuficiente)
             cur.execute(
                 """UPDATE usuarios SET saldo = saldo - %s
                     WHERE id = %s AND saldo >= %s
@@ -117,7 +112,6 @@ def apostar(body: ApuestaRequest, usuario: dict = Depends(usuario_actual)):
                 raise HTTPException(status_code=409, detail="Saldo insuficiente")
             saldo = fila["saldo"]
 
-            # 3) Registrar transacción 'apuesta' y la apuesta pendiente
             detalle = {
                 "evento_id": evento["id"],
                 "partido": f"{evento['equipo_local']} vs {evento['equipo_visita']}",
@@ -152,7 +146,6 @@ def apostar(body: ApuestaRequest, usuario: dict = Depends(usuario_actual)):
 
 @app.get("/api/apuestas/mis-apuestas")
 def mis_apuestas(usuario: dict = Depends(usuario_actual)):
-    """Apuestas del usuario autenticado, con datos del evento."""
     with conexion() as conn:
         with dict_cursor(conn) as cur:
             cur.execute(
@@ -172,11 +165,6 @@ def mis_apuestas(usuario: dict = Depends(usuario_actual)):
 
 @app.post("/api/apuestas/eventos/{evento_id}/resolver")
 def resolver_evento(evento_id: int, body: ResolverRequest, usuario: dict = Depends(requiere_admin)):
-    """
-    (admin) Fija el resultado del evento y liquida sus apuestas pendientes:
-    las ganadoras acreditan su ganancia (transacción 'premio'); el resto
-    quedan 'perdida'. Endpoint didáctico para ver el ciclo completo.
-    """
     if body.resultado not in SELECCIONES:
         raise HTTPException(status_code=400, detail="resultado debe ser local | empate | visita")
 
@@ -191,20 +179,17 @@ def resolver_evento(evento_id: int, body: ResolverRequest, usuario: dict = Depen
             if evento["estado"] == "finalizado":
                 raise HTTPException(status_code=409, detail="El evento ya fue resuelto")
 
-            # Marcar el evento como finalizado con su resultado
             cur.execute(
                 "UPDATE eventos_deportivos SET estado = 'finalizado', resultado = %s WHERE id = %s",
                 (body.resultado, evento_id),
             )
 
-            # Liquidar apuestas pendientes del evento
             cur.execute(
                 "SELECT * FROM apuestas WHERE evento_id = %s AND estado = 'pendiente'",
                 (evento_id,),
             )
             for apuesta in cur.fetchall():
                 if apuesta["seleccion"] == body.resultado:
-                    # Ganadora: acreditar ganancia + transacción 'premio'
                     cur.execute(
                         "UPDATE usuarios SET saldo = saldo + %s WHERE id = %s RETURNING saldo",
                         (apuesta["ganancia_potencial"], apuesta["usuario_id"]),
@@ -239,7 +224,6 @@ def resolver_evento(evento_id: int, body: ResolverRequest, usuario: dict = Depen
 
 
 def _liquidar_apuestas(cur, evento_id: int, resultado: str) -> tuple[int, int]:
-    """Liquida las apuestas pendientes de un evento. Devuelve (ganadoras, perdedoras)."""
     pagadas = 0
     perdidas = 0
     cur.execute(
@@ -276,12 +260,6 @@ def _liquidar_apuestas(cur, evento_id: int, resultado: str) -> tuple[int, int]:
 
 @app.post("/api/apuestas/eventos/{evento_id}/simular")
 def simular_evento(evento_id: int, usuario: dict = Depends(usuario_actual)):
-    """
-    Simula el partido de forma probabilística (Poisson sobre las cuotas), fija el
-    marcador, liquida las apuestas y devuelve la crónica (goles + minutos) para que
-    el frontend la reproduzca en la mini-cancha. Cualquier usuario logueado puede
-    dispararlo (flujo interactivo del jugador).
-    """
     with conexion() as conn:
         with dict_cursor(conn) as cur:
             cur.execute("SELECT * FROM eventos_deportivos WHERE id = %s", (evento_id,))
@@ -327,14 +305,9 @@ def simular_evento(evento_id: int, usuario: dict = Depends(usuario_actual)):
 
 @app.post("/api/apuestas/seed")
 def resembrar(usuario: dict = Depends(requiere_admin)):
-    """(admin) Re-siembra eventos abiertos desde thesportsdb (o fallback)."""
     return sembrar_eventos(forzar=True)
 
 
 @app.post("/api/apuestas/reiniciar")
 def reiniciar(usuario: dict = Depends(usuario_actual)):
-    """
-    Regenera la cartelera de partidos para que cualquier jugador pueda seguir
-    apostando cuando ya simuló todos los eventos abiertos. Reabre los clásicos.
-    """
     return sembrar_eventos(forzar=True)
