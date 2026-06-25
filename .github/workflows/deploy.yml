@@ -1,0 +1,48 @@
+name: Build and Deploy Apuestas Service
+
+on:
+  push:
+    branches:
+      - deploy
+
+jobs:
+  deploy:
+    name: Deploy to ECR and EKS
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build, Tag and Push Image to ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: apuestas-service
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+                     -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+                     -t $ECR_REGISTRY/$ECR_REPOSITORY:v1.0.0 .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:v1.0.0
+
+    - name: Update Kubeconfig
+      run: |
+        aws eks update-kubeconfig --name ${{ secrets.EKS_CLUSTER }} --region ${{ secrets.AWS_REGION }}
+
+    - name: Deploy to EKS
+      run: |
+        kubectl apply -f k8s-deployment.yaml
+        kubectl rollout status deployment/apuestas-service -n vidalcasino
