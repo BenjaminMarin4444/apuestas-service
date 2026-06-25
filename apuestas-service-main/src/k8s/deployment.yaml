@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apuestas-service
+  labels:
+    app: apuestas-service # Coherente
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: apuestas-service # Coherente
+  template:
+    metadata:
+      labels:
+        app: apuestas-service
+    spec:
+      containers:
+        - name: apuestas-service # Coherente
+          image: 511249208390.dkr.ecr.us-east-1.amazonaws.com/apuestas-service:latest # Asegúrate de cambiar la imagen
+          ports:
+            - containerPort: 8005 # Puerto del backend
+          # Recuerda configurar aquí tus probes /livez y /readyz
+          # Y pasar el Secret casino-secrets mediante envFrom
+          envFrom:
+          - secretRef:
+              name: casino-secrets
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8005
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8005
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
