@@ -46,4 +46,4 @@ jobs:
       run: |
         kubectl get namespace vidalcasino || kubectl create namespace vidalcasino
         kubectl apply -f k8s/
-        kubectl rollout status deployment/casino-frontend -n vidalcasino
+        kubectl rollout status deployment/apuestas-service -n vidalcasino
