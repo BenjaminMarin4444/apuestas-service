@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: apuestas
-        image: 115809727769.dkr.ecr.us-east-1.amazonaws.com/apuestas-service:latest
+        image: 802983641807.dkr.ecr.us-east-1.amazonaws.com/apuestas-service:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8005
